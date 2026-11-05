@@ -285,6 +285,7 @@ class SupaAPI{
  unsubscribe(){if(this.ch){this.c.removeChannel(this.ch);this.ch=null}}
  async savePush(sub){const j=sub.toJSON();const row={endpoint:j.endpoint,p256dh:j.keys.p256dh,auth:j.keys.auth,user_agent:navigator.userAgent.slice(0,200)};
   const {error}=await this.c.from('push_subscriptions').insert(row);if(error&&error.code!=='23505')throw this.err(error)}
+ async readPanel(img){const {data,error}=await this.c.functions.invoke('read-panel',{body:{img}});if(error)throw error;if(data&&data.error)throw new Error(data.error);return data}
  async analyzeEdge(prev,cur,ctx){const {data,error}=await this.c.functions.invoke('analyze-photos',{body:{prev,cur,angle:ctx.angle,label:ctx.label}});if(error)throw error;if(data&&data.error)throw new Error(data.error);return data} }
 
 /* ======================= camada de dados: DEMO =======================
@@ -479,6 +480,7 @@ class DemoAPI{
  unsubscribe(){this.listeners=[]}
  async savePush(){throw E('Push no celular requer o app publicado com Supabase (veja LEIAME).')}
  async analyzeEdge(){throw E('IA remota indisponível no modo demonstração')}
+ async readPanel(img,typed){await new Promise(r=>setTimeout(r,500));if(window.__PANEL_MOCK)return window.__PANEL_MOCK(typed);return{legivel:true,km:typed&&typed.km!=null?typed.km:null,km_conf:.95,fuel:typed&&typed.fuel!=null?typed.fuel:null,fuel_conf:.8,nota:'Leitura simulada (modo demonstração).'}}
 }
 
 /* ======================= estado e carga ======================= */
@@ -1270,13 +1272,13 @@ function vsFotos(){
  <div class="row" style="flex-wrap:nowrap;align-items:flex-start;margin:6px 0">${carSVG(a.pos)}<p style="margin:0">${esc(a.t)}</p></div>
  ${isNight()&&a.k!=='painel'?'<div class="warnbox">Está escuro: ative o flash/lanterna antes de fotografar.</div>':''}
  ${skipped&&!ph?'<div class="badbox">Foto pulada (termo aceito). Você ainda pode fotografar agora.</div>':''}
- ${ph?`<div class="imgbox"><span class="tag">Sua foto</span><img src="${ph}"></div>${q?.issues?.length?`<div class="warnbox"><b>Atenção:</b> ${q.issues.map(esc).join(' ')} Recomendamos refazer.</div>`:q?.tips?.length?`<div class="warnbox">${q.tips.map(esc).join(' ')}</div>`:'<div class="okbox">Boa qualidade de foto.</div>'}`
+ ${ph?`<div class="imgbox"><span class="tag">Sua foto</span><img src="${ph}"></div>${q?.issues?.length?`<div class="warnbox"><b>Atenção:</b> ${q.issues.map(esc).join(' ')} Recomendamos refazer.</div>`:q?.tips?.length?`<div class="warnbox">${q.tips.map(esc).join(' ')}</div>`:'<div class="okbox">Boa qualidade de foto.</div>'}${a.k==='painel'?pnBox(PK.read,{km:PK.km===''?null:Number(PK.km),fuel:PK.fuel},'pnUseVs()','pnKeepVs()'):''}`
   :pv?`<div class="imgbox"><span class="tag">Referência (${fmtD(PK.ref.created_at)})</span><img src="${pv}"></div>`:''}
  <div class="row" style="margin-top:10px"><button class="btn pri" onclick="vsShoot()">📷 ${ph?'Refazer':'Tirar'} foto</button><button class="btn" onclick="pickFile(vsSetPhoto)">Câmera do aparelho / galeria</button>
  ${TESTB()?`<button class="btn sm" onclick="vsTest('none')">🧪 Teste</button><button class="btn sm" onclick="vsTest('medium')">🧪 Teste c/ avaria</button>${a.k==='frente'?`<button class="btn sm" onclick="vsTest('nolights')">🧪 Faróis apagados</button>`:''}`:''}</div></div>
  <div class="row sp"><button class="btn" onclick="PK.pi--;render()">← Anterior</button><div class="row"><button class="btn ghost" onclick="skipStep()">Pular esta foto</button>${PK.pi<ANGLES.length-1?`<button class="btn pri" ${ph?'':'disabled'} onclick="PK.pi++;render()">Próxima →</button>`:`<button class="btn pri" ${ph?'':'disabled'} onclick="vsNext1()">Concluir fotos →</button>`}</div></div>`}
 function vsShoot(){const a=ANGLES[PK.pi];capture(vsSetPhoto,{title:a.l,text:a.t,ghost:PK.refUrls[a.k]})}
-async function vsSetPhoto(src){const k=ANGLES[PK.pi].k;PK.photos[k]=src;unskip('foto:'+k);PK.quality[k]=await quality(src,k);render()}
+async function vsSetPhoto(src){const k=ANGLES[PK.pi].k;PK.photos[k]=src;unskip('foto:'+k);PK.quality[k]=await quality(src,k);if(k==='painel'){PK.read=pnOn()?{state:'lendo'}:null}render();if(k==='painel'&&pnOn())vsPanelRead(src)}
 function vsTest(kind){const a=ANGLES[PK.pi];return vsSetPhoto(demoImage(PK.v.plate+'|'+a.k,a.l+' (teste)',kind==='nolights'?{lights:false}:{damage:kind}))}
 function vsNext1(){const miss=ANGLES.filter(a=>!PK.photos[a.k]&&!PK.skipped.includes('foto:'+a.k));if(miss.length){toast('Faltam fotos: '+miss.map(m=>m.l).join(', '));PK.pi=ANGLES.indexOf(miss[0]);return render()}PK.step=2;render();window.scrollTo(0,0)}
 function vsCheck(){return`<div class="card"><h3>Checklist</h3>${CHECKS.map(([k,l])=>`<div class="chk"><span>${esc(l)}</span><div class="seg"><button class="ok ${PK.checks[k]==='ok'?'on':''}" onclick="PK.checks['${k}']='ok';render()">OK</button><button class="is ${PK.checks[k]==='issue'?'on':''}" onclick="PK.checks['${k}']='issue';render()">Problema</button></div></div>`).join('')}
@@ -1339,7 +1341,7 @@ async function vsSave(){const a=PK.analysis;if(damageItems(a).some(i=>!i.opinion
   const extras=[];for(const e of PK.extras){const p=`${base}/extra_${e.id}.jpg`;await api.upload(p,await dataURLtoBlob(e.img));extras.push({path:p,note:e.note,damage:e.damage});busy(true,`Enviando fotos (${++n}/${tot})...`)}
   busy(true,'Salvando vistoria...');const ret=PK.kind==='retirada';
   const notes=[!ret&&PK.parking?'Estacionado: '+PK.parking:'',PK.notes].filter(Boolean).join(' · ')||null;
-  if(!PK.saved){await api.insert('inspections',{id:PK.id,booking_id:PK.b.id,vehicle_id:PK.v.id,driver_id:PK.b.driver_id,kind:PK.kind,km:Number(PK.km),fuel_level:PK.fuel,photos,extras,checks:PK.checks,notes,analysis:a,
+  if(!PK.saved){await pnInsert('inspections',{...pnFields(PK.read,{km:PK.km===''?null:Number(PK.km),fuel:PK.fuel},!PK.photos.painel),id:PK.id,booking_id:PK.b.id,vehicle_id:PK.v.id,driver_id:PK.b.driver_id,kind:PK.kind,km:Number(PK.km),fuel_level:PK.fuel,photos,extras,checks:PK.checks,notes,analysis:a,
    prev_inspection_id:a.reference?.id||null,reference_inspection_id:a.reference?.id||null,comparison_kind:PK.ck,complete,skipped_steps:PK.skipped,skip_ack_at:PK.ack?.at||null,skip_ack_text:PK.ack?.text||null,skip_reason:PK.ack?.reason||null});PK.saved=true}
   const common={vehicle_id:PK.v.id,inspection_id:PK.id,comparison_kind:PK.ck};
   if(!PK.dmgSaved){for(const i of damageItems(a))await api.insert('damages',{...common,angle:i.k,description:i.text,source:'ia',severity:i.status,driver_opinion:i.opinion});
@@ -1362,6 +1364,7 @@ async function openInspection(id){busy(true);try{const i=await loadInsp(id);if(!
  <p class="small"><b>${esc(vName(i.vehicle_id))}</b> · ${fmtDT(i.created_at)} · condutor <b>${esc(pName(i.driver_id))}</b><br>KM ${fmtKm(i.km)} · combustível ${fuelL(Number(i.fuel_level))}${i.notes?'<br>Obs.: '+esc(i.notes):''}</p>
  ${i.complete===false?`<div class="badbox"><b>Vistoria incompleta.</b> Pulado: ${esc((i.skipped_steps||[]).map(s=>s.startsWith('foto:')?angL(s.slice(5)):s).join(', '))}.<br>Termo aceito em ${fmtDT(i.skip_ack_at)}: “${esc(i.skip_ack_text||'')}”${i.skip_reason?'<br>Motivo: '+esc(i.skip_reason):''}</div>`:''}
  <p class="small">Checklist: ${Object.keys(i.checks||{}).length?(bad.length?'<b style="color:var(--bad)">problema em '+bad.map(esc).join(', ')+'</b>':'itens OK'):'não preenchido'}</p>
+ ${pnInfo(i)}
  ${a.consumption?`<div class="${a.consumption.flag?'warnbox':'infobox'}">${a.consumption.km} km rodados · esperado ~${a.consumption.expected_l} L · marcador ~${a.consumption.observed_l} L</div>`:''}
  ${(a.alerts||[]).map(t=>`<div class="warnbox">${esc(t)}</div>`).join('')}
  <div class="infobox">${a.reference||ref?`Comparação: ${i.comparison_kind==='devolucao_vs_retirada'?'devolução × retirada do mesmo uso':'retirada × vistoria anterior'} · referência de ${fmtDT((ref||a.reference).created_at)}${ref?' ('+esc(pName(ref.driver_id))+')':''}`:'Sem referência: esta vistoria virou a referência do veículo.'}</div>
@@ -1375,6 +1378,61 @@ async function compareUse(bid){busy(true);try{const ins=await api.select('inspec
  openModal(`<div class="row sp"><h3>Comparação do uso · ${esc(vName(r?.vehicle_id||d?.vehicle_id))}</h3><button class="btn sm" onclick="closeModal()">✕</button></div>
  <p class="small mut">Esquerda: <b>retirada × devolução anterior</b> (dano no pátio ou do condutor anterior). Direita: <b>devolução × retirada</b> (dano ocorrido durante este uso, responsável: ${esc(pName(d?.driver_id||r?.driver_id))}).</p>
  ${ANGLES.map(a=>`<div class="grid g2"><div>${cmpCard(a.l+' · retirada',prev?.photos?.[a.k],'Devolução anterior',r?.photos?.[a.k],'Retirada',it(r,a.k))}</div><div>${cmpCard(a.l+' · devolução',r?.photos?.[a.k],'Retirada',d?.photos?.[a.k],'Devolução',it(d,a.k))}</div></div>`).join('')}`)}catch(e){toast(e.message)}finally{busy(false)}}
+
+/* ======================= leitura do painel (KM e combustível) por IA ======================= */
+// A IA (função read-panel) lê o hodômetro total e o marcador de combustível na foto do painel; o app confere com o que o condutor digitou.
+// Triagem: o resultado nunca bloqueia o envio. Divergência fica registrada e o gestor é avisado. PANEL_READ:false (config.js) desliga.
+const PN={KM_TOL:2,MINC:.6};
+const pnOn=()=>CONFIG.PANEL_READ!==false;
+const pnSnap=f=>{let b=FUEL[0];for(const x of FUEL)if(Math.abs(x.v-f)<Math.abs(b.v-f))b=x;return b};
+async function pnRead(src,typed){try{if(!pnOn())return{error:'desligado'};const img=DEMO?null:await frame43(src,960,720,.82);return await api.readPanel(img,typed)}catch(e){return{error:String((e&&e.message)||e)}}}
+const pnState=r=>r&&!r.error?{state:'ok',...r}:{state:'erro',erro:(r&&r.error)||''};
+// t = {km:número|null, fuel:número 0-1 (vistoria) | true/false (checklist: ≥1/4 ou não)|null}
+function pnEval(r,t){
+ if(!r||r.state!=='ok')return{check:'nao_lido',bad:[]};
+ const kmOk=r.km!=null&&r.km_conf>=PN.MINC,fuOk=r.fuel!=null&&r.fuel_conf>=PN.MINC,bad=[];
+ if(kmOk&&t.km!=null&&t.km!==''&&Math.abs(Number(t.km)-r.km)>PN.KM_TOL)bad.push('km');
+ if(fuOk&&t.fuel!=null){if(typeof t.fuel==='boolean'){if((t.fuel&&r.fuel<=.15)||(!t.fuel&&r.fuel>=.4))bad.push('fuel')}else if(Math.abs(t.fuel-r.fuel)>.3)bad.push('fuel')}
+ return{check:bad.length?'divergente':(!kmOk&&!fuOk)?'ilegivel':r.corrected?'corrigido':'ok',bad,kmOk,fuOk}}
+function pnFields(r,t,semFoto){
+ if(!pnOn())return{};
+ if(semFoto)return{panel_check:'nao_lido',panel_note:'Foto do painel não registrada.'};
+ const e=pnEval(r,t);
+ return{panel_km_ai:r&&r.state==='ok'?r.km??null:null,panel_fuel_ai:r&&r.state==='ok'?r.fuel??null:null,panel_km_typed:r&&r.state==='ok'&&r.typedOrig!=null?Math.round(r.typedOrig):null,panel_check:e.check,
+  panel_note:r&&r.state==='ok'?[r.nota,r.keep?'Condutor manteve o valor informado.':'',r.km!=null?`confiança KM ${Math.round(r.km_conf*100)}%`:'',r.fuel!=null?`confiança combustível ${Math.round(r.fuel_conf*100)}%`:''].filter(Boolean).join(' · ').slice(0,400):(r&&r.erro?'Leitura indisponível: '+String(r.erro).slice(0,200):null)}}
+// tenta salvar com os campos do painel; se o banco ainda não tem as colunas (migration não rodada), salva sem eles
+async function pnInsert(tb,row){try{return await api.insert(tb,row)}catch(e){if(/panel_/i.test(String((e&&e.message)||e))){const r={...row};Object.keys(r).filter(k=>k.startsWith('panel_')).forEach(k=>delete r[k]);return await api.insert(tb,r)}throw e}}
+const pnFuelTxt=f=>typeof f==='boolean'?(f?'igual ou superior a 1/4':'inferior a 1/4'):fuelL(f);
+function pnBox(r,t,useFn,keepFn){
+ if(!pnOn()||!r)return'';
+ if(r.state==='lendo')return'<div class="infobox">🔎 Lendo o painel (KM e combustível)...</div>';
+ if(r.state!=='ok')return'<div class="infobox">Leitura automática do painel indisponível agora. Siga normalmente: o gestor poderá conferir pela foto.</div>';
+ const e=pnEval(r,t),lido=[r.km!=null&&r.km_conf>=PN.MINC?`hodômetro <b>${fmtKm(r.km)}</b>`:'',r.fuel!=null&&r.fuel_conf>=PN.MINC?`combustível <b>${fuelL(r.fuel)}</b> (~${Math.round(r.fuel*100)}%)`:''].filter(Boolean).join(' · ');
+ if(e.check==='ilegivel')return`<div class="warnbox"><b>Não consegui ler o painel nesta foto.</b>${r.nota?' '+esc(r.nota):''} Refaça com o carro ligado, de frente e sem reflexo, ou siga em frente: o gestor poderá conferir a foto.</div>`;
+ if(e.check==='divergente'){const inf=[t.km!=null&&t.km!==''?`hodômetro <b>${fmtKm(Number(t.km))}</b>`:'',t.fuel!=null?`combustível <b>${pnFuelTxt(t.fuel)}</b>`:''].filter(Boolean).join(' · ');
+  return`<div class="warnbox"><b>⚠ O painel não confere com o que você informou.</b><br>Você informou: ${inf||'-'}<br>Lido no painel: ${lido}${r.nota?`<br><span class="small">${esc(r.nota)}</span>`:''}
+  ${r.keep?'<div class="small" style="margin-top:6px"><b>Mantido.</b> O gestor será avisado para conferir a foto do painel.</div>':`<div class="row" style="margin-top:8px"><button class="btn sm pri" onclick="${useFn}">Usar o que foi lido</button><button class="btn sm" onclick="${keepFn}">Manter o que informei</button></div>`}</div>`}
+ if(e.check==='corrigido')return`<div class="okbox">✔ Valores atualizados com a leitura do painel: ${lido}.${r.typedOrig!=null?` (você tinha informado ${fmtKm(r.typedOrig)})`:''}</div>`;
+ return`<div class="okbox">✔ Confere com o que você informou. Lido no painel: ${lido}.</div>`}
+// vistoria
+async function vsPanelRead(src){const r=await pnRead(src,{km:PK.km===''?null:Number(PK.km),fuel:PK.fuel});if(!PK||PK.photos.painel!==src)return;PK.read={...pnState(r),typedOrig:PK.km===''?null:Number(PK.km),fuelOrig:PK.fuel};render()}
+function pnUseVs(){const r=PK.read;if(!r||r.state!=='ok')return;const e=pnEval(r,{km:PK.km,fuel:PK.fuel});if(e.bad.includes('km'))PK.km=r.km;if(e.bad.includes('fuel'))PK.fuel=pnSnap(r.fuel).v;r.corrected=true;r.keep=false;toast('Valores atualizados com a leitura do painel');render()}
+function pnKeepVs(){if(PK.read)PK.read.keep=true;render()}
+// checklist NOSBEB
+const pnCkT=()=>({km:CK.km===''?null:Number(CK.km),fuel:CK.fuel});
+const ckPnHtml=()=>CK&&CK.painel?pnBox(CK.read,pnCkT(),'pnUseCk()','pnKeepCk()'):'';
+function ckPanelSet(src){CK.painel=src;CK.read={state:'lendo'};render();ckPanelRead(src)}
+async function ckPanelRead(src){const t=pnCkT(),r=await pnRead(src,{km:t.km,fuel:t.fuel===true?.5:t.fuel===false?.1:null});if(!CK||CK.painel!==src)return;CK.read={...pnState(r),typedOrig:t.km,fuelOrig:t.fuel};render()}
+function pnUseCk(){const r=CK.read;if(!r||r.state!=='ok')return;const e=pnEval(r,pnCkT());if(e.bad.includes('km'))CK.km=r.km;if(e.bad.includes('fuel'))CK.fuel=r.fuel>=.2;r.corrected=true;r.keep=false;toast('Valores atualizados com a leitura do painel');render()}
+function pnKeepCk(){if(CK.read)CK.read.keep=true;render()}
+// gestor: o que a IA leu no painel × o que foi informado
+function pnInfo(x){if(!x||!x.panel_check)return'';const c=x.panel_check,km=x.panel_km_ai!=null?fmtKm(x.panel_km_ai):'KM não lido',fu=x.panel_fuel_ai!=null?` · combustível ~${Math.round(x.panel_fuel_ai*100)}% (${fuelL(Number(x.panel_fuel_ai))})`:'';
+ const nota=x.panel_note?`<br><span class="small">${esc(x.panel_note)}</span>`:'';
+ if(c==='divergente')return`<div class="warnbox">📟 <b>Painel (IA) diverge do informado.</b> Informado: ${fmtKm(x.km_declared??x.km)}${x.fuel_level!=null?' · combustível '+fuelL(Number(x.fuel_level)):x.fuel_ok!=null?' · combustível '+(x.fuel_ok?'≥ 1/4':'< 1/4'):''}. Lido: ${km}${fu}. Confira a foto do painel.${nota}</div>`;
+ if(c==='corrigido')return`<div class="infobox">📟 Painel (IA): lido ${km}${fu}. O condutor tinha informado ${x.panel_km_typed!=null?fmtKm(x.panel_km_typed):'outro valor'} e aceitou a correção.${nota}</div>`;
+ if(c==='ok')return`<div class="infobox">📟 Painel (IA): lido ${km}${fu}. Confere com o informado.${nota}</div>`;
+ if(c==='ilegivel')return`<div class="infobox">📟 Painel (IA): não foi possível ler o KM nesta foto. Confira a foto.${nota}</div>`;
+ return`<div class="small mut">📟 Leitura do painel por IA não realizada.${nota}</div>`}
 
 /* ======================= PAINEL (gestor) ======================= */
 function alerts(){const a=[],now=Date.now(),R=(s,t,to)=>a.push([s,t,to]);
@@ -1502,12 +1560,13 @@ VIEWS.checklist=()=>{const t=today(),[tue,thu]=weekDues(),fd=typeof VARG==='stri
   <button class="btn sm" onclick="openChecklist('${v.id}')">📋 Fazer checklist</button></div></div>`).join('')||'<div class="card mut">Nenhum veículo da frota NOSBEB. Vincule os veículos à empresa NOSBEB em Veículos › Editar.</div>'}
  <div class="card"><h3>Ocorrências: não conformidades (30 dias)</h3>${occ.map(k=>`<div class="al" style="cursor:pointer" onclick="openChecklistDetail('${k.id}')"><b>${esc(V(k.vehicle_id)?.plate||'')}</b> ${esc(V(k.vehicle_id)?.model||'')} · ${esc(k.driver_name||pName(k.inspected_by))} · ${fmtDT(k.created_at)}<br><span class="small" style="color:var(--bad)">${Object.entries(k.items||{}).filter(([,x])=>x.status==='nao_conforme').map(([c,x])=>esc(itemLabel(c))+(x.note?' ('+esc(x.note)+')':'')).join(' · ')}</span></div>`).join('')||'<p class="small mut">Nenhuma ocorrência.</p>'}</div>
  <div class="card tw"><div class="row sp"><h3>Histórico de checklists</h3><select style="width:auto" onchange="go('checklist',this.value)"><option value="">Todos os motoristas</option>${drivers.map(([id,n])=>`<option value="${id}" ${fd===id?'selected':''}>${esc(n)} (${D.checklists.filter(k=>k.inspected_by===id).length})</option>`).join('')}</select></div><table><tr><th>Data</th><th>Veículo</th><th>Motorista</th><th>Ref.</th><th>Resultado</th><th>KM</th><th></th></tr>${hist.map(k=>`<tr><td>${fmtDT(k.created_at)}</td><td><b>${esc(V(k.vehicle_id)?.plate||'')}</b><br><span class="small mut">${esc(V(k.vehicle_id)?.model||'')}</span></td><td>${esc(k.driver_name||pName(k.inspected_by))}</td><td>${fmtD(k.due_date)}${k.on_schedule?'':' <span class="small mut">(fora do dia)</span>'}</td>
- <td><span class="badge ${CND[k.condition][0]}">${CND[k.condition][1]}</span>${k.fuel_ok===false?' <span class="badge b-warn">abastecer</span>':''}${k.km_flag?' <span class="badge b-warn">KM menor</span>':''}</td><td>${fmtKm(k.km)}</td><td><button class="btn sm" onclick="openChecklistDetail('${k.id}')">Abrir</button></td></tr>`).join('')||'<tr><td colspan="7" class="mut">Nenhum checklist registrado.</td></tr>'}</table></div>`};
+ <td><span class="badge ${CND[k.condition][0]}">${CND[k.condition][1]}</span>${k.fuel_ok===false?' <span class="badge b-warn">abastecer</span>':''}${k.km_flag?' <span class="badge b-warn">KM menor</span>':''}${k.panel_check==='divergente'?' <span class="badge b-bad">Painel ≠ KM</span>':''}</td><td>${fmtKm(k.km)}</td><td><button class="btn sm" onclick="openChecklistDetail('${k.id}')">Abrir</button></td></tr>`).join('')||'<tr><td colspan="7" class="mut">Nenhum checklist registrado.</td></tr>'}</table></div>`};
 function openPhoto(src){if(!src)return;openModal(`<div class="row sp"><h3>Foto</h3><button class="btn sm" onclick="closeModal()">✕</button></div><img src="${src}" style="width:100%;border-radius:10px">`)}
 function openChecklistDetail(id){const k=D.checklists.find(x=>x.id===id);if(!k)return;const v=V(k.vehicle_id)||D.myFleet.find(x=>x.id===k.vehicle_id)||{};
  const ph=p=>p?`<div class="thumbs"><img data-path="${esc(p)}" onclick="openPhoto(this.src)"></div>`:'';
  openModal(`<div class="row sp"><h3>Checklist · ${esc(v.plate||'')}</h3><button class="btn sm" onclick="closeModal()">✕</button></div>
  <p class="small">Veículo: <b>${esc(v.plate||'')}</b> · ${esc(v.model||'')}<br>Motorista: <b>${esc(k.driver_name||pName(k.inspected_by))}</b>${k.driver_email?' · '+esc(k.driver_email):''}${k.company_id?' · '+esc(D.companies.find(c=>c.id===k.company_id)?.name||''):''}<br>Enviado em ${fmtDT(k.created_at)} · período programado: ${fmtD(k.due_date)}${k.on_schedule?'':' (feito fora do dia)'}<br>${esc(v.model||'')} · KM informado: <b>${fmtKm(k.km_declared??k.km)}</b>${k.km!==(k.km_declared??k.km)?` (corrigido para ${fmtKm(k.km)})`:''}</p>
+ ${pnInfo(k)}${k.photos?.painel?`<div class="small mut">Foto do painel</div>${ph(k.photos.painel)}`:''}
  ${k.km_flag?`<div class="warnbox">KM menor que o último registrado. Justificativa: ${esc(k.km_justification||'-')}</div>`:''}
  ${k.fuel_ok===false?'<div class="warnbox"><b>Solicitar abastecimento:</b> o motorista informou combustível abaixo de 1/4.</div>':''}
  ${Object.keys(k.photos||{}).length?`<div class="small mut">Vistas externas (frente · lateral esquerda · traseira · lateral direita)</div><div class="thumbs">${['frente','lat_esq','traseira','lat_dir'].filter(a=>k.photos[a]).map(a=>`<img data-path="${esc(k.photos[a])}" title="${a}" onclick="openPhoto(this.src)">`).join('')}</div>`:''}
@@ -1516,7 +1575,7 @@ function openChecklistDetail(id){const k=D.checklists.find(x=>x.id===id);if(!k)r
 /* ---- formulário ---- */
 function openChecklist(vid){const list=isS()?NCHK():D.myFleet,v=vid?list.find(x=>x.id===vid):null;
  if(vid&&!v)return toast('Escolha um veículo da frota NOSBEB.');
- CK={id:uuid(),v,views:{frente:null,lat_esq:null,traseira:null,lat_dir:null},base:{},km:'',just:'',items:Object.fromEntries(NITEMS.map(([k])=>[k,{status:'',note:'',photos:[]}])),water:null,oil:null,fuel:null,notes:'',saved:false};closeModal();go('chkForm');ckLoadBase()}
+ CK={id:uuid(),v,views:{frente:null,lat_esq:null,traseira:null,lat_dir:null},base:{},km:'',just:'',items:Object.fromEntries(NITEMS.map(([k])=>[k,{status:'',note:'',photos:[]}])),water:null,oil:null,painel:null,read:null,fuel:null,notes:'',saved:false};closeModal();go('chkForm');ckLoadBase()}
 VIEWS.chkForm=()=>{if(!CK)return isNosbebDriver()?VIEWS.nosbeb():VIEWS.checklist();const v=CK.v||{},t=today(),due=lastDue(t),list=isS()?NCHK():D.myFleet,co=D.companies.find(c=>c.id===(ME.company_id||v.company_id)),low=CK.km!==''&&v.km_current!=null&&Number(CK.km)<Number(v.km_current);
  const slot=(k,l,hint)=>`<div style="margin-top:8px"><b>${l} *</b> <span class="small mut">${hint}</span><div class="imgbox" style="margin:6px 0;max-width:320px">${CK[k]?`<img src="${CK[k]}">`:'<div class="empty">sem foto</div>'}</div><div class="row"><button class="btn sm pri" onclick="ckShoot('${k}')">📸 ${CK[k]?'Refazer':'Fotografar'}</button><button class="btn sm" onclick="ckPick('${k}')">🖼 Escolher do aparelho</button>${TESTB()?`<button class="btn sm ghost" onclick="ckTest('${k}')">🧪 foto de teste</button>`:''}</div></div>`;
  return`<div class="row sp"><h2>Checklist NOSBEB</h2><button class="btn sm" onclick="CK=null;go(isNosbebDriver()?'nosbeb':'checklist')">← Voltar</button></div>
@@ -1532,13 +1591,14 @@ VIEWS.chkForm=()=>{if(!CK)return isNosbebDriver()?VIEWS.nosbeb():VIEWS.checklist
   ${s.status==='nao_conforme'?`<div style="margin-top:6px"><textarea placeholder="Observação sobre: ${esc(l)}" oninput="CK.items['${k}'].note=this.value">${esc(s.note)}</textarea><div class="thumbs" style="margin:6px 0">${s.photos.map((p,j)=>`<img src="${p}" onclick="openPhoto(this.src)">`).join('')}</div><div class="row"><button class="btn sm" onclick="ckItemShoot('${k}')">📸 Foto da evidência</button><button class="btn sm" onclick="ckItemPick('${k}')">🖼 Escolher</button>${TESTB()?`<button class="btn sm ghost" onclick="ckItemTest('${k}')">🧪 foto de teste</button>`:''}</div></div>`:''}
   ${k==='oleo_motor'?slot('oil','🛢 Foto do óleo','vareta ou visor com o nível legível'):''}${k==='radiador'?slot('water','💧 Foto da água','reservatório do radiador com o nível visível'):''}</div>`}).join('')}</div>
  <div class="card"><h3>Fotos externas do veículo *</h3><p class="small mut">As 4 vistas são obrigatórias.${Object.keys(CK.base||{}).length?' Use a foto base (miniatura) como referência de enquadramento.':''}</p><div class="grid g2">${EXT.map(k=>{const a=ANGLES.find(x=>x.k===k);return`<div><b class="small">${esc(a.l.replace(/ \(.*\)/,''))}</b>${CK.base?.[k]?`<div class="small mut">Referência:</div><div class="thumbs"><img data-path="${esc(CK.base[k])}" onclick="openPhoto(this.src)"></div>`:''}<div class="imgbox" style="margin:6px 0;max-width:220px">${CK.views[k]?`<img src="${CK.views[k]}">`:'<div class="empty">sem foto</div>'}</div><div class="row"><button class="btn sm pri" onclick="ckViewShoot('${k}')">📸 ${CK.views[k]?'Refazer':'Fotografar'}</button><button class="btn sm" onclick="ckViewPick('${k}')">🖼</button>${TESTB()?`<button class="btn sm ghost" onclick="ckViewTest('${k}')">🧪</button>`:''}</div></div>`}).join('')}</div></div>
+ <div class="card"><h3>Painel do veículo *</h3><p class="small mut">Com o carro ligado, fotografe o painel. O app lê o KM e o combustível e confere com o que você informou.</p>${slot('painel','📟 Foto do painel','KM e marcador de combustível legíveis, sem reflexo')}<div id="ckPnBox">${ckPnHtml()}</div></div>
  <div class="card"><h3>Combustível</h3><b>O nível de combustível está adequado para uso?</b><div class="small mut">Critério mínimo: 1/4 do tanque.</div>
  <div class="seg" style="margin-top:6px"><button class="ok ${CK.fuel===true?'on':''}" onclick="CK.fuel=true;render()">Sim: igual ou superior a 1/4</button><button class="is ${CK.fuel===false?'on':''}" onclick="CK.fuel=false;render()">Não: inferior a 1/4</button></div>
  ${CK.fuel===false?'<div class="warnbox"><b>Solicitar abastecimento.</b> A gestão será avisada; nenhum abastecimento é registrado por você aqui.</div>':''}
  <label>Observações gerais</label><textarea oninput="CK.notes=this.value">${esc(CK.notes)}</textarea></div>
  <button class="btn pri big" onclick="ckSave()">✔ Enviar checklist</button>`};
 function ckKmWarn(){return`<div class="warnbox">O KM informado é menor que o último registrado (${fmtKm(CK.v?.km_current)}). Confirme o valor ou justifique:<textarea placeholder="Justificativa (obrigatória)" oninput="CK.just=this.value">${esc(CK.just)}</textarea></div>`}
-function ckKmHint(){const el=$('#ckKmWarn');if(!el)return;const low=CK.km!==''&&CK.v&&Number(CK.km)<Number(CK.v.km_current);if(low&&!el.innerHTML)el.innerHTML=ckKmWarn();if(!low)el.innerHTML=''}
+function ckKmHint(){const pb=$('#ckPnBox');if(pb)pb.innerHTML=ckPnHtml();const el=$('#ckKmWarn');if(!el)return;const low=CK.km!==''&&CK.v&&Number(CK.km)<Number(CK.v.km_current);if(low&&!el.innerHTML)el.innerHTML=ckKmWarn();if(!low)el.innerHTML=''}
 function ckVeh(id){CK.v=(isS()?NCHK():D.myFleet).find(x=>x.id===id)||null;CK.base={};render();ckLoadBase()}
 async function ckLoadBase(){if(!CK||!CK.v)return;const id=CK.v.id;try{const r=await api.rpc('vehicle_base_photos',{p_vehicle:id});if(CK&&CK.v?.id===id){CK.base=r[0]?.photos||{};render()}}catch(e){}}
 async function ckViewShoot(k){const a=ANGLES.find(x=>x.k===k);let g=null;if(CK.base?.[k])try{g=await api.photoUrl(CK.base[k])}catch(e){}ckCap(a.l,a.t,src=>{CK.views[k]=src;render()},g)}
@@ -1546,9 +1606,9 @@ function ckViewPick(k){pickFile(src=>{CK.views[k]=src;render()})}
 function ckViewTest(k){CK.views[k]=demoImage((CK.v?.plate||'teste')+'|'+k,'teste',{damage:'none'});render()}
 function ckSet(k,s){CK.items[k].status=s;if(s!=='nao_conforme'){CK.items[k].note='';CK.items[k].photos=[]}render()}
 const ckCap=(title,text,cb,ghost)=>capture(cb,ghost?{title,text,ghost}:{title,text});
-function ckShoot(k){ckCap(k==='water'?'Foto da água':'Foto do óleo',k==='water'?'Enquadre o reservatório do radiador com o nível visível.':'Enquadre a vareta/visor com o nível do óleo legível.',src=>{CK[k]=src;render()})}
-function ckPick(k){pickFile(src=>{CK[k]=src;render()})}
-function ckTest(k){CK[k]=demoChkImage(k==='water'?'agua':'oleo',CK.v?.plate||'teste');render()}
+function ckShoot(k){if(k==='painel')return ckCap('Foto do painel','Ligue o carro. Enquadre o painel de frente, sem reflexo, com o KM e o marcador de combustível legíveis.',ckPanelSet);ckCap(k==='water'?'Foto da água':'Foto do óleo',k==='water'?'Enquadre o reservatório do radiador com o nível visível.':'Enquadre a vareta/visor com o nível do óleo legível.',src=>{CK[k]=src;render()})}
+function ckPick(k){pickFile(src=>{if(k==='painel')return ckPanelSet(src);CK[k]=src;render()})}
+function ckTest(k){if(k==='painel')return ckPanelSet(demoImage((CK.v?.plate||'teste')+'|painel','Painel (teste)',{}));CK[k]=demoChkImage(k==='water'?'agua':'oleo',CK.v?.plate||'teste');render()}
 function ckItemShoot(k){ckCap(itemLabel(k),'Fotografe a evidência da não conformidade.',src=>{CK.items[k].photos.push(src);render()})}
 function ckItemPick(k){pickFile(src=>{CK.items[k].photos.push(src);render()})}
 function ckItemTest(k){CK.items[k].photos.push(demoImage((CK.v?.plate||'teste')+'|lat_esq','teste',{damage:'small'}));render()}
@@ -1557,14 +1617,14 @@ async function ckSave(){const c=CK;if(!c)return;const km=Number(c.km);
  if(c.km===''||isNaN(km)||km<0)return toast('Informe a quilometragem de saída');
  const low=c.v.km_current!=null&&km<Number(c.v.km_current);if(low&&!c.just.trim())return toast('KM menor que o último registrado: informe a justificativa');
  const miss=NITEMS.find(([k])=>!c.items[k].status);if(miss)return toast('Avalie todos os itens. Falta: '+miss[1]);
- if(!c.oil)return toast('Fotografe o óleo (item 13)');if(!c.water)return toast('Fotografe a água do reservatório (item 15)');
+ if(!c.painel)return toast('Fotografe o painel com o carro ligado (KM e combustível)');if(!c.oil)return toast('Fotografe o óleo (item 13)');if(!c.water)return toast('Fotografe a água do reservatório (item 15)');
  const m4=EXT.find(k=>!c.views[k]);if(m4)return toast('Fotografe as 4 vistas externas. Falta: '+ANGLES.find(a=>a.k===m4).l.replace(/ \(.*\)/,''));
  if(c.fuel===null)return toast('Responda se o nível de combustível está adequado');
  busy(true,'Enviando fotos...');try{const base=`nosbeb/${c.v.id}/${c.id}`,wp=`${base}/agua.jpg`,op=`${base}/oleo.jpg`,items={};
-  await api.upload(wp,await dataURLtoBlob(c.water));await api.upload(op,await dataURLtoBlob(c.oil));const photos={};for(const k of EXT){const p=`${base}/${k}.jpg`;await api.upload(p,await dataURLtoBlob(c.views[k]));photos[k]=p}
+  await api.upload(wp,await dataURLtoBlob(c.water));await api.upload(op,await dataURLtoBlob(c.oil));const photos={};for(const k of EXT){const p=`${base}/${k}.jpg`;await api.upload(p,await dataURLtoBlob(c.views[k]));photos[k]=p}{const p=`${base}/painel.jpg`;await api.upload(p,await dataURLtoBlob(c.painel));photos.painel=p}
   for(const [k] of NITEMS){const s=c.items[k],ps=[];for(let i=0;i<s.photos.length;i++){const p=`${base}/item_${k}_${i+1}.jpg`;await api.upload(p,await dataURLtoBlob(s.photos[i]));ps.push(p)}items[k]={status:s.status,note:s.note.trim()||null,photos:ps}}
   busy(true,'Salvando checklist...');
-  if(!c.saved){await api.insert('nosbeb_checklists',{id:c.id,vehicle_id:c.v.id,km,items,photos,fuel_ok:c.fuel,notes:c.notes.trim()||null,water_photo:wp,oil_photo:op,km_justification:low?c.just.trim():null});c.saved=true}
+  if(!c.saved){await pnInsert('nosbeb_checklists',{...pnFields(c.read,{km:km,fuel:c.fuel},!c.painel),id:c.id,vehicle_id:c.v.id,km,items,photos,fuel_ok:c.fuel,notes:c.notes.trim()||null,water_photo:wp,oil_photo:op,km_justification:low?c.just.trim():null});c.saved=true}
   toast(c.fuel===false?'Checklist enviado. Abastecimento solicitado à gestão.':'Checklist enviado ✔');CK=null;await loadData();go(isNosbebDriver()?'nosbeb':'checklist')}catch(e){toast(e.message,6000)}finally{busy(false)}}
 
 /* ======================= EMPRESAS e fotografias ======================= */
@@ -1604,12 +1664,18 @@ function computeDivergences({bk,ins,rf,ck,from}){const DV=CONFIG.DIVERGENCE,out=
    prev=x}}
  consumptionSeries(rf).filter(c=>c.kml!=null&&inP(c.created_at)).forEach(c=>{const v=V(c.vehicle_id);if(!v)return;const ref=Number(c.fuel_type==='alcool'?v.kml_alcool:v.kml_gasolina);
   if(ref&&c.kml<ref*(1-CONFIG.CONSUMPTION_ALERT_PCT/100))add('warn','consumo',{vid:c.vehicle_id,when:c.created_at,text:`Consumo de ${c.kml} km/L, ${Math.round((1-c.kml/ref)*100)}% abaixo do cadastrado (${ref} km/L).`})});
+ for(const x of ins||[]){if(!inP(x.created_at))continue;const w=`Vistoria de ${x.kind==='retirada'?'retirada':'devolução'}`,fu=x.panel_fuel_ai!=null?` · combustível lido ~${Math.round(x.panel_fuel_ai*100)}%`:'';
+  if(x.panel_check==='divergente')add('warn','painel',{vid:x.vehicle_id,booking:x.booking_id,when:x.created_at,text:`${w}: informado ${x.km} km; o painel indica ${x.panel_km_ai!=null?x.panel_km_ai+' km':'KM não lido'}${fu}.`});
+  else if(x.panel_check==='corrigido'&&x.panel_km_typed!=null&&x.panel_km_typed!==x.km)add('info','painel',{vid:x.vehicle_id,booking:x.booking_id,when:x.created_at,text:`${w}: o condutor informou ${x.panel_km_typed} km e corrigiu para ${x.km} km após a leitura do painel.`})}
+ for(const x of ck||[]){if(!inP(x.created_at))continue;const fu=x.panel_fuel_ai!=null?` · combustível lido ~${Math.round(x.panel_fuel_ai*100)}%`:'';
+  if(x.panel_check==='divergente')add('warn','painel',{vid:x.vehicle_id,when:x.created_at,text:`Checklist NOSBEB: informado ${x.km} km; o painel indica ${x.panel_km_ai!=null?x.panel_km_ai+' km':'KM não lido'}${fu}.`});
+  else if(x.panel_check==='corrigido'&&x.panel_km_typed!=null&&x.panel_km_typed!==x.km)add('info','painel',{vid:x.vehicle_id,when:x.created_at,text:`Checklist NOSBEB: o motorista informou ${x.panel_km_typed} km e corrigiu para ${x.km} km após a leitura do painel.`})}
  return out.sort((a,b)=>({bad:0,warn:1,info:2}[a.sev]-{bad:0,warn:1,info:2}[b.sev])||(a.when<b.when?1:-1))}
 VIEWS.divergencias=()=>{const r=VARG&&VARG.from?VARG:{from:addDays(today(),-30),to:today()},DV=CONFIG.DIVERGENCE;AFTER.push(()=>loadDiv(r));
  return`<h2>Divergências de quilometragem e horários</h2>
  <div class="infobox" style="margin:0 0 12px">Compara o <b>programado</b> (horários e km da solicitação) com o <b>realizado</b> (retirada, devolução, hodômetro das vistorias, abastecimentos e checklists). São <b>indícios para conferência</b>, não conclusões. Tolerâncias atuais: ±${DV.KM_PCT}% ou ${DV.KM_ABS} km na distância · ${DV.TIME_MIN} min nos horários · ${DV.KM_GAP} km entre a devolução e a próxima retirada · média máxima de ${DV.MAX_AVG_KMH} km/h no programado (ajuste em <code>CONFIG.DIVERGENCE</code>).</div>
  <div class="card row"><div><label style="margin-top:0">De</label><input type="date" id="dvF" value="${r.from}"></div><div><label style="margin-top:0">Até</label><input type="date" id="dvT" value="${r.to}"></div><button class="btn pri" style="align-self:flex-end" onclick="go('divergencias',{from:$('#dvF').value,to:$('#dvT').value})">Atualizar</button></div><div id="divOut"><div class="card mut">Carregando...</div></div>`};
-const DVT={programado:'Programação',km:'KM programado × realizado',horario:'Horário',odometro:'Hodômetro',consumo:'Consumo'};
+const DVT={painel:'Painel × digitado',programado:'Programação',km:'KM programado × realizado',horario:'Horário',odometro:'Hodômetro',consumo:'Consumo'};
 async function loadDiv(r){try{const f=new Date(r.from+'T00:00:00').toISOString(),t=new Date(r.to+'T23:59:59').toISOString(),f0=new Date(new Date(f)-30*864e5).toISOString(),W=(k)=>[['gte',k,f0],['lte',k,t]];
  const [bk,ins,rf,ck]=await Promise.all([api.select('bookings',{f:[['gte','start_at',f],['lte','start_at',t]],order:'start_at'}),api.select('inspections',{f:W('created_at'),order:'created_at'}),api.select('refuels',{f:W('created_at'),order:'created_at'}),api.select('nosbeb_checklists',{f:W('created_at'),order:'created_at'})]);
  const L=computeDivergences({bk,ins,rf,ck,from:f}),n=s=>L.filter(x=>x.sev===s).length,SB={bad:['b-bad','Crítico'],warn:['b-warn','Atenção'],info:['b-info','Info']};
