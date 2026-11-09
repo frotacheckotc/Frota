@@ -246,20 +246,22 @@ class SupaAPI{
   if(e.code==='23505')return new Error('Registro duplicado (placa ou cartão já cadastrado).');
   if(/inspections_skip_ack/.test(m))return new Error('Para pular etapas é preciso aceitar o termo de responsabilidade.');
   if(/bookings_vehicle_required/.test(m))return new Error('Informe o veículo para aprovar a reserva.');
-  if(/row-level security|permission denied/i.test(m))return new Error('Sem permissão para esta ação.');
+  if(/row-level security|permission denied|operação não permitida/i.test(m))return new Error('Sem permissão para esta ação.');
   return new Error(m)}
  async login(card,pin){const {error}=await this.c.auth.signInWithPassword({email:this.email(card),password:this.pw(card,pin)});if(error)throw new Error('Cartão ou PIN inválido.');const me=await this.me();if(!me)throw new Error('Usuário sem cadastro no app. Procure o gestor de frota.');if(!me.active){await this.logout();throw new Error('Usuário desativado.')}return me}
- async me(){const {data:{session}}=await this.c.auth.getSession();if(!session)return null;const {data,error}=await this.c.from('profiles').select('*').eq('id',session.user.id).maybeSingle();if(error)throw this.err(error);return data}
+ async me(){const {data:{session}}=await this.c.auth.getSession();if(!session)return null;const r=await this.select('profiles',{f:[['eq','id',session.user.id]]});return r[0]||null}
  async logout(){this.unsubscribe();await this.c.auth.signOut()}
- async select(t,q={}){let r=this.c.from(t).select('*');for(const [op,col,val] of (q.f||[]))r=r[op](col,val);if(q.order)r=r.order(q.order,{ascending:!q.desc});if(q.limit)r=r.limit(q.limit);const {data,error}=await r;if(error)throw this.err(error);return data}
- async insert(t,row){const {data,error}=await this.c.from(t).insert(row).select().single();if(error)throw this.err(error);return data}
- async update(t,id,patch){const {data,error}=await this.c.from(t).update(patch).eq('id',id).select().maybeSingle();if(error)throw this.err(error);return data}
- async del(t,id){const {error}=await this.c.from(t).delete().eq('id',id);if(error)throw this.err(error)}
- async delInspections(ids){const {data:rows}=await this.c.from('inspections').select('id,photos,extras').in('id',ids);const paths=[];(rows||[]).forEach(i=>{Object.values(i.photos||{}).forEach(p=>p&&paths.push(p));(i.extras||[]).forEach(e=>e&&e.path&&paths.push(e.path))});
-  const {data,error}=await this.c.from('inspections').delete().in('id',ids).select('id');if(error)throw this.err(error);if(!data||data.length<ids.length)throw new Error('Sem permissão para excluir (apenas o gestor) ou vistoria já removida');
+ async fc(fn,args){const {data,error}=await this.c.rpc(fn,args);if(error)throw this.err(error);return data}
+ async select(t,q={}){return this.fc('fc_sel',{p_ent:t,p_f:q.f||[],p_order:q.order||null,p_desc:!!q.desc,p_lim:q.limit||null,p_off:q.offset||0})}
+ async insert(t,row){return this.fc('fc_ins',{p_ent:t,p_row:row})}
+ async update(t,id,patch){const r=await this.fc('fc_upd',{p_ent:t,p_patch:patch,p_f:[['eq','id',id]]});return r[0]||null}
+ async updateWhere(t,patch,f){return this.fc('fc_upd',{p_ent:t,p_patch:patch,p_f:f})}
+ async del(t,id){await this.fc('fc_del',{p_ent:t,p_f:[['eq','id',id]]})}
+ async delInspections(ids){const rows=await this.select('inspections',{f:[['in','id',ids]]});const paths=[];(rows||[]).forEach(i=>{Object.values(i.photos||{}).forEach(p=>p&&paths.push(p));(i.extras||[]).forEach(e=>e&&e.path&&paths.push(e.path))});
+  const data=await this.fc('fc_del',{p_ent:'inspections',p_f:[['in','id',ids]]});if(!data||data.length<ids.length)throw new Error('Sem permissão para excluir (apenas o gestor) ou vistoria já removida');
   if(paths.length){const {error:se}=await this.c.storage.from('vistorias').remove(paths);if(se)console.warn('fotos não removidas',se)}}
- async delChecklists(ids){const {data:rows}=await this.c.from('nosbeb_checklists').select('id,water_photo,oil_photo,photos,items').in('id',ids);const paths=[];(rows||[]).forEach(k=>{[k.water_photo,k.oil_photo].forEach(p=>p&&paths.push(p));Object.values(k.photos||{}).forEach(p=>p&&paths.push(p));Object.values(k.items||{}).forEach(it=>(it&&it.photos||[]).forEach(p=>p&&paths.push(p)))});
-  const {data,error}=await this.c.from('nosbeb_checklists').delete().in('id',ids).select('id');if(error)throw this.err(error);if(!data||data.length<ids.length)throw new Error('Sem permissão para excluir (apenas o gestor) ou checklist já removido');
+ async delChecklists(ids){const rows=await this.select('nosbeb_checklists',{f:[['in','id',ids]]});const paths=[];(rows||[]).forEach(k=>{[k.water_photo,k.oil_photo].forEach(p=>p&&paths.push(p));Object.values(k.photos||{}).forEach(p=>p&&paths.push(p));Object.values(k.items||{}).forEach(it=>(it&&it.photos||[]).forEach(p=>p&&paths.push(p)))});
+  const data=await this.fc('fc_del',{p_ent:'nosbeb_checklists',p_f:[['in','id',ids]]});if(!data||data.length<ids.length)throw new Error('Sem permissão para excluir (apenas o gestor) ou checklist já removido');
   if(paths.length){const {error:se}=await this.c.storage.from('vistorias').remove(paths);if(se)console.warn('fotos não removidas',se)}}
  async rpc(fn,args={}){const {data,error}=await this.c.rpc(fn,args);if(error)throw this.err(error);return data}
  async upload(path,blob){// idempotente: caminho determinístico por vistoria; reenvio de arquivo existente é ignorado
@@ -279,12 +281,12 @@ class SupaAPI{
  async bootstrap(p,pin){const {data,error}=await this.c.auth.signUp({email:this.email(p.card),password:this.pw(p.card,pin)});if(error)throw this.err(error);
   if(!data.session)throw new Error('Desative "Confirm email" no Supabase (Authentication > Providers > Email) e tente de novo.');
   await this.insert('profiles',{...p,id:data.user.id,role:'gestor'});return this.me()}
- async delNotifications(ids){if(!ids.length)return;const {data,error}=await this.c.from('notifications').delete().in('id',ids).select('id');if(error)throw this.err(error);if((data||[]).length<ids.length)throw new Error('Sem permissão para excluir notificações (falta rodar a migração no Supabase).')}
- async markRead(ids){if(!ids.length)return;const {error}=await this.c.from('notifications').update({read_at:nowISO()}).in('id',ids);if(error)throw this.err(error)}
+ async delNotifications(ids){if(!ids.length)return;const data=await this.fc('fc_del',{p_ent:'notifications',p_f:[['in','id',ids]]});if((data||[]).length<ids.length)throw new Error('Sem permissão para excluir notificações (falta rodar a migração no Supabase).')}
+ async markRead(ids){if(!ids.length)return;await this.updateWhere('notifications',{read_at:nowISO()},[['in','id',ids]])}
  subscribeNotifs(uid,cb){this.unsubscribe();this.ch=this.c.channel('fc-notif-'+uid).on('postgres_changes',{event:'INSERT',schema:'public',table:'notifications',filter:'user_id=eq.'+uid},p=>cb(p.new)).subscribe()}
  unsubscribe(){if(this.ch){this.c.removeChannel(this.ch);this.ch=null}}
  async savePush(sub){const j=sub.toJSON();const row={endpoint:j.endpoint,p256dh:j.keys.p256dh,auth:j.keys.auth,user_agent:navigator.userAgent.slice(0,200)};
-  const {error}=await this.c.from('push_subscriptions').insert(row);if(error&&error.code!=='23505')throw this.err(error)}
+  try{await this.insert('push_subscriptions',row)}catch(e){if(!/duplicate|registro duplicado/i.test(e.message))throw e}}
  async readPanel(img){const {data,error}=await this.c.functions.invoke('read-panel',{body:{img}});if(error)throw error;if(data&&data.error)throw new Error(data.error);return data}
  async analyzeEdge(prev,cur,ctx){const {data,error}=await this.c.functions.invoke('analyze-photos',{body:{prev,cur,angle:ctx.angle,label:ctx.label}});if(error)throw error;if(data&&data.error)throw new Error(data.error);return data} }
 
@@ -1555,9 +1557,8 @@ const BK_TABLES=['companies','profiles','vehicles','vehicle_drivers','bookings',
 const BK_MES=['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
 // lê a tabela inteira, de 1000 em 1000 (limite do Supabase por consulta); col+from/to filtram por data
 async function bkAll(t,col,from,to){
- if(!api.c)return api.select(t,{f:[...(from&&col?[['gte',col,from]]:[]),...(to&&col?[['lte',col,to]]:[])]});
- const out=[];for(let o=0;;o+=1000){let q=api.c.from(t).select('*').order('id',{ascending:true}).range(o,o+999);if(col&&from)q=q.gte(col,from);if(col&&to)q=q.lte(col,to);
-  const {data,error}=await q;if(error)throw api.err(error);out.push(...data);if(data.length<1000)break}
+ const f=[...(from&&col?[['gte',col,from]]:[]),...(to&&col?[['lte',col,to]]:[])];
+ const out=[];for(let o=0;;o+=1000){const data=await api.select(t,{f,order:'id',limit:1000,offset:o});out.push(...data);if(data.length<1000)break}
  return out}
 const bkTxt=x=>String(x??'').replace(/[–—]/g,'-').replace(/[“”]/g,'"').replace(/[‘’]/g,"'").replace(/\s+/g,' ').replace(/[^\x20-\x7E -ÿ]/g,'').trim();
 const bkDT=i=>i?bkTxt(new Date(i).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(',','')):'-';
@@ -1697,7 +1698,7 @@ async function bkRecPdf(kind,r,X){await bkLib();const {jsPDF}=window.jspdf;const
  return doc}
 // separa os registros ligados às vistorias: as avarias ficam (custos), só deixam de apontar para a vistoria apagada
 async function bkDetach(ids){if(!ids.length)return;if(!api.c){api.t.damages.forEach(d=>{if(ids.includes(d.inspection_id))d.inspection_id=null});return}
- const {error}=await api.c.from('damages').update({inspection_id:null}).in('inspection_id',ids);if(error)throw api.err(error)}
+ await api.updateWhere('damages',{inspection_id:null},[['in','inspection_id',ids]])}
 async function bkPlan(day){const to=new Date(new Date(day+'T00:00:00').getTime()-1).toISOString();const R={};
  for(const [t,col] of [['companies'],['profiles'],['vehicles'],['bookings','start_at'],['inspections','created_at'],['damages','created_at'],['nosbeb_checklists','created_at']]){busy(true,'Lendo '+t+'...');R[t]=await bkAll(t,col,null,to)}
  const prot=new Set();for(const v of R.vehicles){for(const t of ['inspections','nosbeb_checklists']){const L=await api.select(t,{f:[['eq','vehicle_id',v.id]],order:'created_at',desc:true,limit:1});if(L&&L[0])prot.add(L[0].id)}}
