@@ -4,3 +4,4 @@ window.FC_CONFIG = {
   AI_ENGINE: 'edge'
   };
 // publicação do site reenviada (sem mudança de conteúdo)
+// deploy: diesel
