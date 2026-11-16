@@ -240,7 +240,6 @@ function consumptionSeries(refuels){const by={};
 class SupaAPI{
  constructor(){this.c=supabase.createClient(CONFIG.SUPABASE_URL,CONFIG.SUPABASE_ANON_KEY);this.urls={};this.ch=null}
  email(card){return normCard(card).toLowerCase()+'@'+CONFIG.EMAIL_DOMAIN}
- pw(card,pin){return `fc-${pin}-${normCard(card)}`}
  err(e){if(!e)return;const m=e.message||String(e);
   if(e.code==='23P01'||/bookings_no_overlap/.test(m))return new Error('Este veículo já está reservado nesse horário.');
   if(e.code==='23505')return new Error('Registro duplicado (placa ou cartão já cadastrado).');
@@ -248,7 +247,13 @@ class SupaAPI{
   if(/bookings_vehicle_required/.test(m))return new Error('Informe o veículo para aprovar a reserva.');
   if(/row-level security|permission denied|operação não permitida/i.test(m))return new Error('Sem permissão para esta ação.');
   return new Error(m)}
- async login(card,pin){const {error}=await this.c.auth.signInWithPassword({email:this.email(card),password:this.pw(card,pin)});if(error)throw new Error('Cartão ou PIN inválido.');const me=await this.me();if(!me)throw new Error('Usuário sem cadastro no app. Procure o gestor de frota.');if(!me.active){await this.logout();throw new Error('Usuário desativado.')}return me}
+ async fnErr(e){try{const j=await e.context.json();if(j&&j.error)return new Error(j.error)}catch(_){}return new Error(e.message)}
+ async signIn(card,pin){// o servidor confere o PIN, conta os erros (bloqueio no 5º) e só então entrega a senha do Auth
+  const r=await this.rpc('fc_login',{p_card:normCard(card),p_pin:String(pin)});
+  if(!r||!r.ok){if(r&&r.locked)throw new Error('Conta bloqueada por excesso de tentativas. Procure o gestor de frota para desbloquear.');
+   const n=r&&r.remaining;throw new Error('Cartão ou PIN inválido.'+(n!=null&&n<=3?` Resta${n===1?'':'m'} ${n} tentativa${n===1?'':'s'} antes do bloqueio.`:''))}
+  const {error}=await this.c.auth.signInWithPassword({email:this.email(card),password:r.secret});if(error)throw new Error('Não foi possível entrar agora. Tente novamente.')}
+ async login(card,pin){await this.signIn(card,pin);const me=await this.me();if(!me)throw new Error('Usuário sem cadastro no app. Procure o gestor de frota.');if(!me.active){await this.logout();throw new Error('Usuário desativado.')}return me}
  async me(){const {data:{session}}=await this.c.auth.getSession();if(!session)return null;const r=await this.select('profiles',{f:[['eq','id',session.user.id]]});return r[0]||null}
  async logout(){this.unsubscribe();await this.c.auth.signOut()}
  async fc(fn,args){const {data,error}=await this.c.rpc(fn,args);if(error)throw this.err(error);return data}
@@ -269,18 +274,16 @@ class SupaAPI{
    if(!error||/exist|duplicate/i.test(error.message))return path;if(t===2)throw this.err(error);await new Promise(r=>setTimeout(r,800*(t+1)))}}
  async photoUrl(path){const c=this.urls[path];if(c&&c.exp>Date.now())return c.url;const {data,error}=await this.c.storage.from('vistorias').createSignedUrl(path,3600);if(error)return'';this.urls[path]={url:data.signedUrl,exp:Date.now()+3300e3};return data.signedUrl}
  async photoBlob(path){const {data,error}=await this.c.storage.from('vistorias').download(path);if(error)throw this.err(error);return data}
- async createUser(p,pin){
-  const tmp=supabase.createClient(CONFIG.SUPABASE_URL,CONFIG.SUPABASE_ANON_KEY,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false,storageKey:'fc-tmp'}});
-  const {data,error}=await tmp.auth.signUp({email:this.email(p.card),password:this.pw(p.card,pin)});
-  if(error)throw new Error(/registered|exists/i.test(error.message)?'Já existe um login com este cartão.':error.message);
-  if(!data.session)throw new Error('Usuário criado, mas o Supabase exige confirmação de e-mail. Desative "Confirm email" em Authentication > Providers > Email.');
-  return this.insert('profiles',{...p,id:data.user.id})}
+ async createUser(p,pin){// o login é criado no servidor (função auth-admin): o cadastro público do Auth fica desligado
+  const {data,error}=await this.c.functions.invoke('auth-admin',{body:{action:'create',card:p.card,pin}});
+  if(error)throw await this.fnErr(error);if(data&&data.error)throw new Error(data.error);
+  return this.insert('profiles',{...p,id:data.id})}
  async resetPin(id,pin){return this.rpc('set_user_pin',{p_user:id,p_pin:pin})}
- async changeMyPin(card,pin){const {error}=await this.c.auth.updateUser({password:this.pw(card,pin)});if(error)throw this.err(error)}
+ async changeMyPin(card,pin){await this.rpc('fc_change_pin',{p_pin:String(pin)})}
  async bootstrapNeeded(){return this.rpc('no_profiles')}
- async bootstrap(p,pin){const {data,error}=await this.c.auth.signUp({email:this.email(p.card),password:this.pw(p.card,pin)});if(error)throw this.err(error);
-  if(!data.session)throw new Error('Desative "Confirm email" no Supabase (Authentication > Providers > Email) e tente de novo.');
-  await this.insert('profiles',{...p,id:data.user.id,role:'gestor'});return this.me()}
+ async bootstrap(p,pin){const {data,error}=await this.c.functions.invoke('auth-admin',{body:{action:'bootstrap',card:p.card,pin}});
+  if(error)throw await this.fnErr(error);if(data&&data.error)throw new Error(data.error);
+  await this.signIn(p.card,pin);await this.insert('profiles',{...p,id:data.id,role:'gestor'});return this.me()}
  async delNotifications(ids){if(!ids.length)return;const data=await this.fc('fc_del',{p_ent:'notifications',p_f:[['in','id',ids]]});if((data||[]).length<ids.length)throw new Error('Sem permissão para excluir notificações (falta rodar a migração no Supabase).')}
  async markRead(ids){if(!ids.length)return;await this.updateWhere('notifications',{read_at:nowISO()},[['in','id',ids]])}
  subscribeNotifs(uid,cb){this.unsubscribe();this.ch=this.c.channel('fc-notif-'+uid).on('postgres_changes',{event:'INSERT',schema:'public',table:'notifications',filter:'user_id=eq.'+uid},p=>cb(p.new)).subscribe()}
@@ -292,7 +295,7 @@ class SupaAPI{
 
 /* ======================= estado e carga ======================= */
 let api,ME=null,view='',VARG=null,AFTER=[],PK=null,AG=null,CK=null,alertTimer=null;
-const D={vehicles:[],profiles:[],bookings:[],damages:[],refuels:[],maintenance:[],recent:[],periods:[],notifications:[],managers:[],companies:[],checklists:[],fuelReq:[],vdrivers:[],myFleet:[]};
+const D={locks:[],vehicles:[],profiles:[],bookings:[],damages:[],refuels:[],maintenance:[],recent:[],periods:[],notifications:[],managers:[],companies:[],checklists:[],fuelReq:[],vdrivers:[],myFleet:[]};
 const isG=()=>ME?.role==='gestor',isS=()=>['gestor','recepcao'].includes(ME?.role);
 const V=id=>D.vehicles.find(v=>v.id===id),P=id=>D.profiles.find(p=>p.id===id)||(id===ME?.id?ME:null);
 const vName=id=>{const v=V(id);return v?`${v.plate} · ${v.model}`:(id?'(veículo)':'— a definir —')};
@@ -316,7 +319,7 @@ async function loadData(){
  Object.assign(D,{vehicles:v||[],profiles:p||[],bookings:[...bm.values()].sort((a,b)=>a.start_at.localeCompare(b.start_at)),notifications:nt||[]});
  if(!isS()){try{D.managers=await api.rpc('manager_contacts')}catch(e){D.managers=[]}}
  {const [co,ck]=await Promise.all([api.select('companies',{order:'name'}),api.select('nosbeb_checklists',{order:'created_at',desc:true,limit:300})]);Object.assign(D,{companies:co,checklists:ck})}   // motorista: RLS devolve só os próprios checklists
- if(isG()){D.fuelReq=await api.select('fuel_requests',{order:'created_at',desc:true,limit:200})}
+ if(isG()){D.fuelReq=await api.select('fuel_requests',{order:'created_at',desc:true,limit:200});try{D.locks=await api.rpc('fc_locked_users')}catch(e){D.locks=[]}}
  else if(!isS()){try{D.myFleet=await api.rpc('nosbeb_my_vehicles')}catch(e){D.myFleet=[]}}
  if(isG()){const s7=new Date(Date.now()-7*864e5).toISOString();
   const [dm,r,m,ri,mp]=await Promise.all([api.select('damages',{f:[['in','status',['pendente','confirmada']]],order:'created_at',desc:true,limit:300}),api.select('refuels',{order:'created_at',desc:true,limit:500}),
@@ -327,7 +330,7 @@ let refreshing=false;
 async function refresh(){if(refreshing)return;refreshing=true;try{await loadData()}catch(e){toast('Erro ao carregar: '+e.message)}finally{refreshing=false}if(!PK)render()}
 
 /* ======================= cálculos de negócio ======================= */
-const BUILD='2026-11-09.3',FUEL_OPTS=[['gasolina','Gasolina'],['diesel','Diesel']],FUELS={gasolina:'Gasolina',alcool:'Álcool',diesel:'Diesel'},fuelLbl=f=>FUELS[f]||'Gasolina',kmlOf=(v,f)=>f==='diesel'?v.kml_diesel:f==='alcool'?v.kml_alcool:v.kml_gasolina,kml=v=>Number(kmlOf(v,v.current_fuel))||10;
+const BUILD='2026-11-16.1',FUEL_OPTS=[['gasolina','Gasolina'],['diesel','Diesel']],FUELS={gasolina:'Gasolina',alcool:'Álcool',diesel:'Diesel'},fuelLbl=f=>FUELS[f]||'Gasolina',kmlOf=(v,f)=>f==='diesel'?v.kml_diesel:f==='alcool'?v.kml_alcool:v.kml_gasolina,kml=v=>Number(kmlOf(v,v.current_fuel))||10;
 // período REAL de uso (agenda e disponibilidade): devolução antecipada libera o veículo em returned_at
 function realRange(b){const s=b.started_at||b.start_at;let e=b.returned_at||b.end_at;if(!b.returned_at&&['em_uso','chave_retirada'].includes(b.status))e=new Date(Math.max(+new Date(b.end_at),Date.now())).toISOString();return[s,e]}
 function occupies(b,s,e){if(!ACTIVE.includes(b.status))return false;const bs=+new Date(b.started_at||b.start_at);let be=+new Date(b.end_at);if(b.status!=='aprovada')be=Math.max(be,Date.now()+15*6e4);return bs<e&&s<be}
@@ -1525,12 +1528,15 @@ const UF=isNew=>[{n:'card',l:'Nº do cartão / matrícula',req:1,ro:!isNew},{n:'
 function userForm(id){const u=P(id);openForm(id?'Editar usuário':'Novo usuário',UF(!id),u||{role:'condutor'},async o=>{
  if(id)return api.update('profiles',id,o);const pin=String(o.pin||'');if(!/^\d{4,8}$/.test(pin))throw new Error('PIN deve ter de 4 a 8 dígitos');delete o.pin;o.card=normCard(o.card);return api.createUser(o,pin)})}
 async function resetPin(id){const p=prompt(`Novo PIN para ${pName(id)} (4 a 8 dígitos):`);if(!p)return;if(!/^\d{4,8}$/.test(p))return toast('PIN inválido');try{await api.resetPin(id,p);toast('PIN redefinido')}catch(e){toast(e.message)}}
+const LK=id=>(D.locks||[]).find(l=>l.user_id===id);
+const lockBadge=id=>{const l=LK(id);return l?(l.locked_at?' <span class="badge b-bad">bloqueado</span>':l.fails?` <span class="badge b-warn">${l.fails} erro${l.fails>1?'s':''} de PIN</span>`:''):''};
+async function unlockUser(id){if(!confirm(`Desbloquear ${pName(id)}? Ele poderá entrar de novo com o PIN atual.`))return;busy(true);try{await api.rpc('fc_unlock_user',{p_user:id});toast('Usuário desbloqueado');await refresh()}catch(e){toast(e.message)}finally{busy(false)}}
 async function toggleUser(id){const u=P(id);if(u.id===ME.id)return toast('Você não pode desativar a si mesmo');if(u.active&&!confirm(`Desativar ${u.name}? Ele não conseguirá mais entrar no app.`))return;busy(true);try{await api.update('profiles',id,{active:!u.active});await refresh()}catch(e){toast(e.message)}finally{busy(false)}}
 VIEWS.usuarios=()=>{const q=(VARG||'').toLowerCase(),L=D.profiles.filter(u=>!q||u.name.toLowerCase().includes(q)||u.card.toLowerCase().includes(q));
  return`<div class="row sp"><h2>Usuários (${D.profiles.length})</h2><button class="btn pri" onclick="userForm()">+ Novo usuário</button></div>
  <div class="card"><input placeholder="Buscar por nome ou cartão" value="${esc(VARG||'')}" onchange="go('usuarios',this.value)"><p class="small mut">${D.profiles.filter(u=>u.role==='condutor'&&u.active).length} condutores ativos · ${D.profiles.filter(u=>u.role==='recepcao').length} recepção · ${D.profiles.filter(u=>u.role==='gestor').length} gestor(es) · ${D.profiles.filter(u=>!u.active).length} inativos</p></div>
- <div class="card tw"><table><tr><th>Nome</th><th>Cartão</th><th>Perfil</th><th>CNH</th><th>Usos (45d)</th><th></th></tr>${L.map(u=>{const d=daysTo(u.cnh_validade),n=D.bookings.filter(b=>b.driver_id===u.id&&b.started_at).length,inc=D.bookings.filter(b=>b.driver_id===u.id&&(b.flags||[]).includes('vistoria_incompleta')).length;return`<tr style="${u.active?'':'opacity:.5'}"><td><b>${esc(u.name)}</b>${u.department?`<br><span class="small mut">${esc(u.department)}</span>`:''}${u.phone?`<br><span class="small mut">${esc(u.phone)}</span>`:''}${u.active?'':' <span class="badge b-mut">inativo</span>'}</td><td>${esc(u.card)}</td><td>${ROLE[u.role]}</td>
- <td>${fmtD(u.cnh_validade)} ${d!==null&&d<=45?stBadge(d<0?'bad':'warn',d<0?'vencida':d+' dias'):''}</td><td>${n}${inc?` <span class="badge b-bad">${inc} sem vistoria</span>`:''}</td><td style="white-space:nowrap"><button class="btn sm" onclick="userForm('${u.id}')">Editar</button> <button class="btn sm" onclick="resetPin('${u.id}')">PIN</button> <button class="btn sm" onclick="toggleUser('${u.id}')">${u.active?'Desativar':'Ativar'}</button></td></tr>`}).join('')}</table></div>`};
+ <div class="card tw"><table><tr><th>Nome</th><th>Cartão</th><th>Perfil</th><th>CNH</th><th>Usos (45d)</th><th></th></tr>${L.map(u=>{const d=daysTo(u.cnh_validade),n=D.bookings.filter(b=>b.driver_id===u.id&&b.started_at).length,inc=D.bookings.filter(b=>b.driver_id===u.id&&(b.flags||[]).includes('vistoria_incompleta')).length;return`<tr style="${u.active?'':'opacity:.5'}"><td><b>${esc(u.name)}</b>${u.department?`<br><span class="small mut">${esc(u.department)}</span>`:''}${u.phone?`<br><span class="small mut">${esc(u.phone)}</span>`:''}${u.active?'':' <span class="badge b-mut">inativo</span>'}${lockBadge(u.id)}</td><td>${esc(u.card)}</td><td>${ROLE[u.role]}</td>
+ <td>${fmtD(u.cnh_validade)} ${d!==null&&d<=45?stBadge(d<0?'bad':'warn',d<0?'vencida':d+' dias'):''}</td><td>${n}${inc?` <span class="badge b-bad">${inc} sem vistoria</span>`:''}</td><td style="white-space:nowrap">${LK(u.id)?.locked_at?`<button class="btn sm pri" onclick="unlockUser('${u.id}')">Desbloquear</button> `:''}<button class="btn sm" onclick="userForm('${u.id}')">Editar</button> <button class="btn sm" onclick="resetPin('${u.id}')">PIN</button> <button class="btn sm" onclick="toggleUser('${u.id}')">${u.active?'Desativar':'Ativar'}</button></td></tr>`}).join('')}</table></div>`};
 
 /* ======================= RELATÓRIOS ======================= */
 VIEWS.relatorios=()=>{const r=VARG||{from:today().slice(0,8)+'01',to:today()};AFTER.push(()=>loadReport(r));
